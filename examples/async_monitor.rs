@@ -1,10 +1,22 @@
 use futures::{
     channel::mpsc::{channel, Receiver, SendError},
+    SinkExt, StreamExt,
 };
-use notify::{Config, Event, FsEventWatcher, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    // Config,
+    // Event,
+    // RecommendedWatcher,
+    FsEventWatcher,
+    RecursiveMode,
+    Watcher,
+};
 
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent, Debouncer};
-use std::{path::Path, time::Duration, sync::{RwLock, Arc}};
+use std::{
+    path::Path,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 /// Async, futures channel based event watching
 fn main() {
@@ -21,14 +33,14 @@ fn main() {
 }
 
 struct FsWatchBuilder {
-   options: FsWatchOptions
+    options: FsWatchOptions,
 }
 
 #[derive(Debug, Default)]
 enum EventState {
     #[default]
     Sending,
-    Halted(SendError)
+    Halted(SendError),
 }
 
 type RWEventState = Arc<RwLock<EventState>>;
@@ -36,10 +48,9 @@ type RWEventState = Arc<RwLock<EventState>>;
 struct FsWatch {
     debouncer: Debouncer<FsEventWatcher>,
     receiver: Receiver<Result<Vec<DebouncedEvent>, notify::Error>>,
-    event_state: RWEventState
-    options: FsWatchOptions
+    event_state: RWEventState,
+    options: FsWatchOptions,
 }
-
 
 #[derive(Default)]
 pub enum FsWatchRecursiveMode {
@@ -48,22 +59,27 @@ pub enum FsWatchRecursiveMode {
     Recursive,
 }
 
-
 struct FsWatchOptions {
     debounce_s: u64,
     recursive_mode: FsWatchRecursiveMode,
-    path: String
+    path: String,
 }
 
 impl Default for FsWatchOptions {
     fn default() -> Self {
-        Self { debounce_s: Default::default(), recursive_mode: Default::default(), path: ".".to_string() }
+        Self {
+            debounce_s: Default::default(),
+            recursive_mode: Default::default(),
+            path: ".".to_string(),
+        }
     }
 }
 
 impl FsWatchBuilder {
     pub fn new() -> Self {
-        Self { options: FsWatchOptions::default() }
+        Self {
+            options: FsWatchOptions::default(),
+        }
     }
 
     pub fn debounce(&mut self, seconds: u64) -> &mut Self {
@@ -71,19 +87,19 @@ impl FsWatchBuilder {
         self
     }
 
-    pub fn recursive(&mut self)-> &mut Self  {
+    pub fn recursive(&mut self) -> &mut Self {
         self.options.recursive_mode = FsWatchRecursiveMode::Recursive;
         self
     }
 
-    pub fn path(&mut self, path: String) -> &mut Self   {
+    pub fn path(&mut self, path: String) -> &mut Self {
         self.options.path = path;
         self
     }
 
-    pub fn build(self: Self) -> Result<FsWatch, String> {
+    pub fn build(&self) -> Result<FsWatch, String> {
         let (mut tx, receiver) = channel(1);
-        let event_state: RWEventState  = Arc::new(RwLock::new(EventState::default()));
+        let event_state: RWEventState = Arc::new(RwLock::new(EventState::default()));
         let local_event_state = event_state;
         let debouncer: Debouncer<FsEventWatcher> =
             new_debouncer(Duration::from_secs(self.options.debounce_s), move |res| {
@@ -97,59 +113,57 @@ impl FsWatchBuilder {
                         }
                     }
                 })
-            }).map_err(|e| e.to_string())?;
+            })
+            .map_err(|e| e.to_string())?;
 
         Ok(FsWatch {
             options: self.options,
             debouncer,
             receiver,
-            event_state
+            event_state,
         })
-
     }
-
 }
-
 
 struct FsWatching {
     watch: FsWatch,
-    watcher: Box<dyn Watcher>
+    watcher: &'a mut dyn Watcher,
 }
 
-
-
 impl FsWatch {
-    // pub fn watch(self) -> Result<FsWatching, String> {
-    pub fn watch(self) -> Result<Box<dyn Watcher>, String> {
-        let mut selfy = self;
-        let watcher = selfy.debouncer.watcher();
+    pub fn watch<'a>(&self) -> Result<FsWatching<'a>, String> {
+        let watcher = self.debouncer.watcher();
         let recursive_mode = match self.options.recursive_mode {
             FsWatchRecursiveMode::Flat => RecursiveMode::NonRecursive,
-            FsWatchRecursiveMode::Recursive => RecursiveMode::Recursive
+            FsWatchRecursiveMode::Recursive => RecursiveMode::Recursive,
         };
-        watcher.watch(&Path::new(&self.options.path), recursive_mode).map_err(|e| e.to_string())?;
-        let boxed = Box::new(watcher);
-        Ok(FsWatching {
+        watcher
+            .watch(&Path::new(&self.options.path), recursive_mode)
+            .map_err(|e| e.to_string())?;
+
+        Ok(FsWatching<'a> {
             watch: self,
-            watcher: boxed,
+            watcher: watcher,
         })
     }
 }
 
 async fn async_watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
-    let watch = FsWatchBuilder::new()
+    let mut watch = FsWatchBuilder::new()
         .debounce(1)
         .path(".".to_owned())
-        .build().unwrap();
-    let x = watch.watch().unwrap();
+        .build()
+        .unwrap()
+        .watch()
+        .unwrap();
 
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
-    debouncer
-        .watcher()
-        .watch(path.as_ref(), RecursiveMode::Recursive)?;
+    // debouncer
+    //     .watcher()
+    //     .watch(path.as_ref(), RecursiveMode::Recursive)?;
 
-    while let Some(res) = rx.next().await {
+    while let Some(res) = watch.watch.receiver.next().await {
         match res {
             Ok(event) => println!("changed: {:?}", event),
             Err(e) => println!("watch error: {:?}", e),
